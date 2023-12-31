@@ -38,6 +38,7 @@
 
 static char *user_runtime_unit_dir = NULL;
 static bool can_unshare;
+static bool have_net_dummy;
 static unsigned n_ran_tests = 0;
 
 STATIC_DESTRUCTOR_REGISTER(user_runtime_unit_dir, freep);
@@ -584,7 +585,7 @@ static int find_libraries(const char *exec, char ***ret) {
         _cleanup_(sd_event_source_unrefp) sd_event_source *sigchld_source = NULL;
         _cleanup_(sd_event_source_unrefp) sd_event_source *stdout_source = NULL;
         _cleanup_(sd_event_source_unrefp) sd_event_source *stderr_source = NULL;
-        _cleanup_close_pair_ int outpipe[2] = PIPE_EBADF, errpipe[2] = PIPE_EBADF;
+        _cleanup_close_pair_ int outpipe[2] = EBADF_PAIR, errpipe[2] = EBADF_PAIR;
         _cleanup_strv_free_ char **libraries = NULL;
         _cleanup_free_ char *result = NULL;
         pid_t pid;
@@ -601,7 +602,7 @@ static int find_libraries(const char *exec, char ***ret) {
         r = safe_fork_full("(spawn-ldd)",
                            (int[]) { -EBADF, outpipe[1], errpipe[1] },
                            NULL, 0,
-                           FORK_RESET_SIGNALS|FORK_CLOSE_ALL_FDS|FORK_DEATHSIG|FORK_REARRANGE_STDIO|FORK_LOG, &pid);
+                           FORK_RESET_SIGNALS|FORK_CLOSE_ALL_FDS|FORK_DEATHSIG_SIGTERM|FORK_REARRANGE_STDIO|FORK_LOG, &pid);
         assert_se(r >= 0);
         if (r == 0) {
                 execlp("ldd", "ldd", exec, NULL);
@@ -753,6 +754,18 @@ static void test_exec_systemcallfilter(Manager *m) {
         test(m, "exec-systemcallfilter-with-errno-in-allow-list.service", errno_from_name("EILSEQ"), CLD_EXITED);
         test(m, "exec-systemcallfilter-override-error-action.service", SIGSYS, CLD_KILLED);
         test(m, "exec-systemcallfilter-override-error-action2.service", errno_from_name("EILSEQ"), CLD_EXITED);
+
+        test(m, "exec-systemcallfilter-nonewprivileges.service", MANAGER_IS_SYSTEM(m) ? 0 : EXIT_GROUP, CLD_EXITED);
+        test(m, "exec-systemcallfilter-nonewprivileges-protectclock.service", MANAGER_IS_SYSTEM(m) ? 0 : EXIT_GROUP, CLD_EXITED);
+
+        r = find_executable("capsh", NULL);
+        if (r < 0) {
+                log_notice_errno(r, "Skipping %s, could not find capsh binary: %m", __func__);
+                return;
+        }
+
+        test(m, "exec-systemcallfilter-nonewprivileges-bounding1.service", MANAGER_IS_SYSTEM(m) ? 0 : EXIT_GROUP, CLD_EXITED);
+        test(m, "exec-systemcallfilter-nonewprivileges-bounding2.service", MANAGER_IS_SYSTEM(m) ? 0 : EXIT_GROUP, CLD_EXITED);
 #endif
 }
 
@@ -1057,6 +1070,9 @@ static void test_exec_ambientcapabilities(Manager *m) {
         test(m, "exec-ambientcapabilities.service", 0, CLD_EXITED);
         test(m, "exec-ambientcapabilities-merge.service", 0, CLD_EXITED);
 
+        if (have_effective_cap(CAP_SETUID) > 0)
+                test(m, "exec-ambientcapabilities-dynuser.service", can_unshare ? 0 : EXIT_NAMESPACE, CLD_EXITED);
+
         if (!check_nobody_user_and_group()) {
                 log_notice("nobody user/group is not synthesized or may conflict to other entries, skipping remaining tests in %s", __func__);
                 return;
@@ -1074,6 +1090,9 @@ static void test_exec_ambientcapabilities(Manager *m) {
 static void test_exec_privatenetwork(Manager *m) {
         int r;
 
+        if (!have_net_dummy)
+                return (void)log_notice("Skipping %s, dummy network interface not available", __func__);
+
         r = find_executable("ip", NULL);
         if (r < 0) {
                 log_notice_errno(r, "Skipping %s, could not find ip binary: %m", __func__);
@@ -1086,6 +1105,9 @@ static void test_exec_privatenetwork(Manager *m) {
 
 static void test_exec_networknamespacepath(Manager *m) {
         int r;
+
+        if (!have_net_dummy)
+                return (void)log_notice("Skipping %s, dummy network interface not available", __func__);
 
         r = find_executable("ip", NULL);
         if (r < 0) {
@@ -1259,7 +1281,7 @@ static void run_tests(RuntimeScope scope, char **patterns) {
                 return (void) log_tests_skipped_errno(r, "manager_new");
         assert_se(r >= 0);
 
-        m->default_std_output = EXEC_OUTPUT_NULL; /* don't rely on host journald */
+        m->defaults.std_output = EXEC_OUTPUT_NULL; /* don't rely on host journald */
         assert_se(manager_startup(m, NULL, NULL, NULL) >= 0);
 
         /* Uncomment below if you want to make debugging logs stored to journal. */
@@ -1292,7 +1314,7 @@ static int prepare_ns(const char *process_name) {
         r = safe_fork(process_name,
                       FORK_RESET_SIGNALS |
                       FORK_CLOSE_ALL_FDS |
-                      FORK_DEATHSIG |
+                      FORK_DEATHSIG_SIGTERM |
                       FORK_WAIT |
                       FORK_REOPEN_LOG |
                       FORK_LOG |
@@ -1424,18 +1446,23 @@ static int intro(void) {
                 return log_tests_skipped("/sys is mounted read-only");
 
         /* Create dummy network interface for testing PrivateNetwork=yes */
-        (void) system("ip link add dummy-test-exec type dummy");
+        have_net_dummy = system("ip link add dummy-test-exec type dummy") == 0;
 
-        /* Create a network namespace and a dummy interface in it for NetworkNamespacePath= */
-        (void) system("ip netns add test-execute-netns");
-        (void) system("ip netns exec test-execute-netns ip link add dummy-test-ns type dummy");
+        if (have_net_dummy) {
+                /* Create a network namespace and a dummy interface in it for NetworkNamespacePath= */
+                (void) system("ip netns add test-execute-netns");
+                (void) system("ip netns exec test-execute-netns ip link add dummy-test-ns type dummy");
+        }
 
         return EXIT_SUCCESS;
 }
 
 static int outro(void) {
-        (void) system("ip link del dummy-test-exec");
-        (void) system("ip netns del test-execute-netns");
+        if (have_net_dummy) {
+                (void) system("ip link del dummy-test-exec");
+                (void) system("ip netns del test-execute-netns");
+        }
+
         (void) rmdir(PRIVATE_UNIT_DIR);
 
         return EXIT_SUCCESS;

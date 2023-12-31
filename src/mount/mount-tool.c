@@ -35,6 +35,7 @@
 #include "stat-util.h"
 #include "strv.h"
 #include "terminal-util.h"
+#include "udev-util.h"
 #include "umask-util.h"
 #include "unit-def.h"
 #include "unit-name.h"
@@ -83,30 +84,26 @@ STATIC_DESTRUCTOR_REGISTER(arg_property, strv_freep);
 STATIC_DESTRUCTOR_REGISTER(arg_automount_property, strv_freep);
 
 static int parse_where(const char *input, char **ret_where) {
-        _cleanup_free_ char *where = NULL;
         int r;
 
         assert(input);
         assert(ret_where);
 
         if (arg_transport == BUS_TRANSPORT_LOCAL) {
-                r = chase(input, NULL, CHASE_NONEXISTENT, &where, NULL);
+                r = chase(input, NULL, CHASE_NONEXISTENT, ret_where, NULL);
                 if (r < 0)
                         return log_error_errno(r, "Failed to make path %s absolute: %m", input);
         } else {
-                where = strdup(input);
-                if (!where)
-                        return log_oom();
-
-                path_simplify(where);
-
-                if (!path_is_absolute(where))
+                if (!path_is_absolute(input))
                         return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
                                                "Path must be absolute when operating remotely: %s",
-                                               where);
+                                               input);
+
+                r = path_simplify_alloc(input, ret_where);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to simplify path %s: %m", input);
         }
 
-        *ret_where = TAKE_PTR(where);
         return 0;
 }
 
@@ -441,17 +438,16 @@ static int parse_argv(int argc, char *argv[]) {
                                 r = chase(u, NULL, 0, &arg_mount_what, NULL);
                                 if (r < 0)
                                         return log_error_errno(r, "Failed to make path %s absolute: %m", u);
+
                         } else {
-                                arg_mount_what = strdup(argv[optind]);
-                                if (!arg_mount_what)
-                                        return log_oom();
-
-                                path_simplify(arg_mount_what);
-
-                                if (!path_is_absolute(arg_mount_what))
+                                if (!path_is_absolute(argv[optind]))
                                         return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
                                                                "Path must be absolute when operating remotely: %s",
-                                                               arg_mount_what);
+                                                               argv[optind]);
+
+                                r = path_simplify_alloc(argv[optind], &arg_mount_what);
+                                if (r < 0)
+                                        return log_error_errno(r, "Failed to simplify path: %m");
                         }
                 }
 
@@ -979,7 +975,6 @@ static int stop_mounts(
 }
 
 static int umount_by_device(sd_bus *bus, sd_device *dev) {
-        _cleanup_(sd_device_unrefp) sd_device *d = NULL;
         _cleanup_strv_free_ char **list = NULL;
         const char *v;
         int r, ret = 0;
@@ -987,7 +982,7 @@ static int umount_by_device(sd_bus *bus, sd_device *dev) {
         assert(bus);
         assert(dev);
 
-        if (sd_device_get_property_value(d, "SYSTEMD_MOUNT_WHERE", &v) >= 0)
+        if (sd_device_get_property_value(dev, "SYSTEMD_MOUNT_WHERE", &v) >= 0)
                 ret = stop_mounts(bus, v);
 
         r = sd_device_get_devname(dev, &v);
@@ -1054,11 +1049,9 @@ static int action_umount(
                 for (int i = optind; i < argc; i++) {
                         _cleanup_free_ char *p = NULL;
 
-                        p = strdup(argv[i]);
-                        if (!p)
-                                return log_oom();
-
-                        path_simplify(p);
+                        r = path_simplify_alloc(argv[i], &p);
+                        if (r < 0)
+                                return r;
 
                         r = stop_mounts(bus, p);
                         if (r < 0)
@@ -1140,20 +1133,6 @@ static int acquire_mount_options(sd_device *d) {
         return 1;
 }
 
-static const char *get_model(sd_device *d) {
-        const char *model;
-
-        assert(d);
-
-        if (sd_device_get_property_value(d, "ID_MODEL_FROM_DATABASE", &model) >= 0)
-                return model;
-
-        if (sd_device_get_property_value(d, "ID_MODEL", &model) >= 0)
-                return model;
-
-        return NULL;
-}
-
 static const char* get_label(sd_device *d) {
         const char *label;
 
@@ -1181,7 +1160,7 @@ static int acquire_mount_where(sd_device *d) {
 
                 name = get_label(d);
                 if (!name)
-                        name = get_model(d);
+                        (void) device_get_model_string(d, &name);
                 if (!name) {
                         const char *dn;
 
@@ -1247,12 +1226,12 @@ static int acquire_mount_where_for_loop_dev(sd_device *dev) {
 }
 
 static int acquire_description(sd_device *d) {
-        const char *model, *label;
+        const char *model = NULL, *label;
 
         if (arg_description)
                 return 0;
 
-        model = get_model(d);
+        (void) device_get_model_string(d, &model);
 
         label = get_label(d);
         if (!label)
@@ -1417,18 +1396,18 @@ static int discover_device(void) {
         return 0;
 }
 
-enum {
-        COLUMN_NODE,
-        COLUMN_PATH,
-        COLUMN_MODEL,
-        COLUMN_WWN,
-        COLUMN_FSTYPE,
-        COLUMN_LABEL,
-        COLUMN_UUID,
-        _COLUMN_MAX,
-};
-
 static int list_devices(void) {
+        enum {
+                COLUMN_NODE,
+                COLUMN_PATH,
+                COLUMN_MODEL,
+                COLUMN_WWN,
+                COLUMN_FSTYPE,
+                COLUMN_LABEL,
+                COLUMN_UUID,
+                _COLUMN_MAX,
+        };
+
         _cleanup_(sd_device_enumerator_unrefp) sd_device_enumerator *e = NULL;
         _cleanup_(table_unrefp) Table *table = NULL;
         int r;
@@ -1445,7 +1424,7 @@ static int list_devices(void) {
         if (r < 0)
                 return log_error_errno(r, "Failed to add property match: %m");
 
-        table = table_new("NODE", "PATH", "MODEL", "WWN", "TYPE", "LABEL", "UUID");
+        table = table_new("NODE", "PATH", "MODEL", "WWN", "FSTYPE", "LABEL", "UUID");
         if (!table)
                 return log_oom();
 
@@ -1457,6 +1436,7 @@ static int list_devices(void) {
                 return log_error_errno(r, "Failed to set sort index: %m");
 
         table_set_header(table, arg_legend);
+        table_set_ersatz_string(table, TABLE_ERSATZ_DASH);
 
         FOREACH_DEVICE(e, d) {
                 for (unsigned c = 0; c < _COLUMN_MAX; c++) {
@@ -1473,7 +1453,7 @@ static int list_devices(void) {
                                 break;
 
                         case COLUMN_MODEL:
-                                x = get_model(d);
+                                (void) device_get_model_string(d, &x);
                                 break;
 
                         case COLUMN_WWN:
@@ -1493,7 +1473,7 @@ static int list_devices(void) {
                                 break;
                         }
 
-                        r = table_add_cell(table, NULL, c == COLUMN_NODE ? TABLE_PATH : TABLE_STRING, strna(x));
+                        r = table_add_cell(table, NULL, c == COLUMN_NODE ? TABLE_PATH : TABLE_STRING, x);
                         if (r < 0)
                                 return table_log_add_error(r);
                 }

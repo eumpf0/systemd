@@ -229,7 +229,82 @@
           <xi:include href="version-info.xml" xpointer="v243"/>
           </listitem>
         </varlistentry>
+        <varlistentry>
+          <term><option>--subsystem-match<optional>=SUBSYSTEM</optional></option></term>
+          <term><option>--subsystem-nomatch<optional>=SUBSYSTEM</optional></option></term>
+          <listitem>
+            <para>When used with <option>--export-db</option>, only show devices of or not of the given
+            subsystem respectively.</para>
 
+          <xi:include href="version-info.xml" xpointer="v255"/>
+          </listitem>
+        </varlistentry>
+        <varlistentry>
+          <term><option>--attr-match<optional>=FILE[=VALUE]</optional></option></term>
+          <term><option>--attr-nomatch<optional>=FILE[=VALUE]</optional></option></term>
+          <listitem>
+            <para>When used with <option>--export-db</option>, only show devices matching or not matching the
+            given attribute respectively.</para>
+
+          <xi:include href="version-info.xml" xpointer="v255"/>
+          </listitem>
+        </varlistentry>
+        <varlistentry>
+          <term><option>--property-match<optional>=KEY=VALUE</optional></option></term>
+          <listitem>
+            <para>When used with <option>--export-db</option>, only show devices matching the given property
+            and value.</para>
+
+          <xi:include href="version-info.xml" xpointer="v255"/>
+          </listitem>
+        </varlistentry>
+        <varlistentry>
+          <term><option>--tag-match<optional>=TAG</optional></option></term>
+          <listitem>
+            <para>When used with <option>--export-db</option>, only show devices with the given tag.</para>
+
+          <xi:include href="version-info.xml" xpointer="v255"/>
+          </listitem>
+        </varlistentry>
+        <varlistentry>
+          <term><option>--sysname-match<optional>=NAME</optional></option></term>
+          <listitem>
+            <para>When used with <option>--export-db</option>, only show devices with the given
+            <literal>/sys</literal> path.</para>
+
+          <xi:include href="version-info.xml" xpointer="v255"/>
+          </listitem>
+        </varlistentry>
+        <varlistentry>
+          <term><option>--name-match<optional>=NAME</optional></option></term>
+          <listitem>
+            <para>When used with <option>--export-db</option>, only show devices with the given name in
+            <literal>/dev</literal>.</para>
+
+          <xi:include href="version-info.xml" xpointer="v255"/>
+          </listitem>
+        </varlistentry>
+        <varlistentry>
+          <term><option>--parent-match<optional>=NAME</optional></option></term>
+          <listitem>
+            <para>When used with <option>--export-db</option>, only show devices with the given parent
+            device.</para>
+
+          <xi:include href="version-info.xml" xpointer="v255"/>
+          </listitem>
+        </varlistentry>
+        <varlistentry>
+          <term><option>--initialized-match</option></term>
+          <term><option>--initialized-nomatch</option></term>
+          <listitem>
+            <para>When used with <option>--export-db</option>, only show devices that are initialized or not
+            initialized respectively.</para>
+
+          <xi:include href="version-info.xml" xpointer="v255"/>
+          </listitem>
+        </varlistentry>
+
+        <xi:include href="standard-options.xml" xpointer="json" />
         <xi:include href="standard-options.xml" xpointer="help" />
         <xi:include href="standard-options.xml" xpointer="no-pager" />
       </variablelist>
@@ -450,6 +525,8 @@
           <listitem>
             <para>Trigger events for devices with a matching device path. When this option is specified more than once,
             then each matching result is ORed, that is, all specified devices are triggered.</para>
+
+            <xi:include href="version-info.xml" xpointer="v218"/>
           </listitem>
         </varlistentry>
         <varlistentry>
@@ -494,6 +571,8 @@
             settle</command>. <command>udevadm settle</command> waits for all
             events to finish. This option only waits for events triggered by
             the same command to finish.</para>
+
+            <xi:include href="version-info.xml" xpointer="v238"/>
           </listitem>
         </varlistentry>
         <varlistentry>
@@ -730,6 +809,8 @@
             be resolved for every event. When set to
             <constant>never</constant>, names will never be resolved
             and all devices will be owned by root.</para>
+
+            <xi:include href="version-info.xml" xpointer="v209"/>
           </listitem>
         </varlistentry>
 
@@ -755,6 +836,8 @@
             <literal>online</literal>, <literal>offline</literal>, <literal>bind</literal>,
             and <literal>unbind</literal>. Also, the special value <literal>help</literal> can be used
             to list the possible actions. The default value is <literal>add</literal>.</para>
+
+          <xi:include href="version-info.xml" xpointer="v250"/>
           </listitem>
         </varlistentry>
 

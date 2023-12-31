@@ -44,6 +44,24 @@ int parse_boolean(const char *v) {
         return -EINVAL;
 }
 
+int parse_tristate_full(const char *v, const char *third, int *ret) {
+        int r;
+
+        if (isempty(v) || streq_ptr(v, third)) { /* Empty string is always taken as the third/invalid/auto state */
+                if (ret)
+                        *ret = -1;
+        } else {
+                r = parse_boolean(v);
+                if (r < 0)
+                        return r;
+
+                if (ret)
+                        *ret = r;
+        }
+
+        return 0;
+}
+
 int parse_pid(const char *s, pid_t* ret_pid) {
         unsigned long ul = 0;
         pid_t pid;
@@ -422,6 +440,21 @@ int safe_atou_full(const char *s, unsigned base, unsigned *ret_u) {
         if (ret_u)
                 *ret_u = (unsigned) l;
 
+        return 0;
+}
+
+int safe_atou_bounded(const char *s, unsigned min, unsigned max, unsigned *ret) {
+        unsigned v;
+        int r;
+
+        r = safe_atou(s, &v);
+        if (r < 0)
+                return r;
+
+        if (v < min || v > max)
+                return -ERANGE;
+
+        *ret = v;
         return 0;
 }
 

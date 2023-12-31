@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
-#include <net/if.h>
-#include <linux/netdevice.h> /* Must be included after <net/if.h> */
+#include <linux/netdevice.h>
 #include <netinet/ether.h>
 #include <unistd.h>
 
@@ -365,7 +364,6 @@ Link *link_free(Link *link) {
 
         sd_device_unref(link->device);
         free(link->kind);
-        free(link->driver);
         strv_free(link->altnames);
         return mfree(link);
 }
@@ -418,8 +416,8 @@ int link_new(LinkConfigContext *ctx, sd_netlink **rtnl, sd_device *device, Link 
                         log_link_debug_errno(link, r, "Failed to get permanent hardware address, ignoring: %m");
         }
 
-        r = ethtool_get_driver(&ctx->ethtool_fd, link->ifname, &link->driver);
-        if (r < 0)
+        r = sd_device_get_property_value(link->device, "ID_NET_DRIVER", &link->driver);
+        if (r < 0 && r != -ENOENT)
                 log_link_debug_errno(link, r, "Failed to get driver, ignoring: %m");
 
         *ret = TAKE_PTR(link);

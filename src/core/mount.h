@@ -3,8 +3,9 @@
 
 typedef struct Mount Mount;
 
-#include "kill.h"
 #include "dynamic-user.h"
+#include "kill.h"
+#include "pidref.h"
 #include "unit.h"
 
 typedef enum MountExecCommand {
@@ -83,7 +84,7 @@ struct Mount {
 
         ExecCommand* control_command;
         MountExecCommand control_command_id;
-        pid_t control_pid;
+        PidRef control_pid;
 
         sd_event_source *timer_event_source;
 
@@ -95,6 +96,10 @@ extern const UnitVTable mount_vtable;
 void mount_fd_event(Manager *m, int events);
 
 int mount_invalidate_state_by_path(Manager *manager, const char *path);
+
+char* mount_get_what_escaped(const Mount *m);
+char* mount_get_options_escaped(const Mount *m);
+const char* mount_get_fstype(const Mount *m);
 
 const char* mount_exec_command_to_string(MountExecCommand i) _const_;
 MountExecCommand mount_exec_command_from_string(const char *s) _pure_;

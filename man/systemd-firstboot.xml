@@ -37,7 +37,7 @@
     <para><command>systemd-firstboot</command> initializes basic system settings interactively during the
     first boot, or non-interactively on an offline system image. The service is started during boot if
     <varname>ConditionFirstBoot=yes</varname> is met, which essentially means that <filename>/etc/</filename>
-    is empty, see
+    is unpopulated, see
     <citerefentry><refentrytitle>systemd.unit</refentrytitle><manvolnum>5</manvolnum></citerefentry> for
     details.</para>
 
@@ -202,7 +202,9 @@
         for more information on the format of the hashed password. Note that it is not recommended to specify
         plaintext passwords on the command line, as other users might be able to see them simply by invoking
         <citerefentry project='die-net'><refentrytitle>ps</refentrytitle><manvolnum>1</manvolnum></citerefentry>.
-        </para></listitem>
+        </para>
+
+        <xi:include href="version-info.xml" xpointer="v216"/></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -237,7 +239,9 @@
         <listitem><para>Prompt the user interactively for a specific
         basic setting. Note that any explicit configuration settings
         specified on the command line take precedence, and the user is
-        not prompted for it.</para></listitem>
+        not prompted for it.</para>
+
+        <xi:include href="version-info.xml" xpointer="v216"/></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -265,7 +269,9 @@
 
         <listitem><para>Copy a specific basic setting from the host.
         This only works in combination with <option>--root=</option> or <option>--image=</option>.
-        </para></listitem>
+        </para>
+
+        <xi:include href="version-info.xml" xpointer="v216"/></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -287,8 +293,8 @@
         <term><option>--force</option></term>
 
         <listitem><para>Write configuration even if the relevant files already exist. Without this option,
-        <filename>systemd-firstboot</filename> doesn't modify or replace existing files. Note that when
-        configuring the root account, even with this option, <filename>systemd-firstboot</filename> only
+        <command>systemd-firstboot</command> doesn't modify or replace existing files. Note that when
+        configuring the root account, even with this option, <command>systemd-firstboot</command> only
         modifies the entry of the <literal>root</literal> user, leaving other entries in
         <filename>/etc/passwd</filename> and <filename>/etc/shadow</filename> intact.</para>
 

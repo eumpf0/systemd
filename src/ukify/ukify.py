@@ -70,6 +70,14 @@ EFI_ARCHES: list[str] = sum(EFI_ARCH_MAP.values(), [])
 DEFAULT_CONFIG_DIRS = ['/run/systemd', '/etc/systemd', '/usr/local/lib/systemd', '/usr/lib/systemd']
 DEFAULT_CONFIG_FILE = 'ukify.conf'
 
+class Style:
+    bold = "\033[0;1;39m" if sys.stderr.isatty() else ""
+    gray = "\033[0;38;5;245m" if sys.stderr.isatty() else ""
+    red = "\033[31;1m" if sys.stderr.isatty() else ""
+    yellow = "\033[33;1m" if sys.stderr.isatty() else ""
+    reset = "\033[0m" if sys.stderr.isatty() else ""
+
+
 def guess_efi_arch():
     arch = os.uname().machine
 
@@ -250,13 +258,14 @@ DEFAULT_SECTIONS_TO_SHOW = {
         '.linux'    : 'binary',
         '.initrd'   : 'binary',
         '.splash'   : 'binary',
-        '.dt'       : 'binary',
+        '.dtb'      : 'binary',
         '.cmdline'  : 'text',
         '.osrel'    : 'text',
         '.uname'    : 'text',
         '.pcrpkey'  : 'text',
         '.pcrsig'   : 'text',
         '.sbat'     : 'text',
+        '.sbom'     : 'binary',
 }
 
 @dataclasses.dataclass
@@ -837,8 +846,6 @@ uki,1,UKI,uki,1,https://www.freedesktop.org/software/systemd/man/systemd-stub.ht
     print(f"Wrote {'signed' if sign_args_present else 'unsigned'} {opts.output}")
 
 
-ONE_DAY = datetime.timedelta(1, 0, 0)
-
 
 @contextlib.contextmanager
 def temporary_umask(mask: int):
@@ -858,15 +865,16 @@ def generate_key_cert_pair(
 ) -> tuple[bytes]:
 
     from cryptography import x509
-    import cryptography.hazmat.primitives as hp
+    from cryptography.hazmat.primitives import serialization, hashes
+    from cryptography.hazmat.primitives.asymmetric import rsa
 
     # We use a keylength of 2048 bits. That is what Microsoft documents as
     # supported/expected:
     # https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/windows-secure-boot-key-creation-and-management-guidance?view=windows-11#12-public-key-cryptography
 
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(datetime.UTC)
 
-    key = hp.asymmetric.rsa.generate_private_key(
+    key = rsa.generate_private_key(
         public_exponent=65537,
         key_size=keylength,
     )
@@ -878,7 +886,7 @@ def generate_key_cert_pair(
     ).not_valid_before(
         now,
     ).not_valid_after(
-        now + ONE_DAY * valid_days
+        now + datetime.timedelta(days=valid_days)
     ).serial_number(
         x509.random_serial_number()
     ).public_key(
@@ -888,36 +896,37 @@ def generate_key_cert_pair(
         critical=True,
     ).sign(
         private_key=key,
-        algorithm=hp.hashes.SHA256(),
+        algorithm=hashes.SHA256(),
     )
 
     cert_pem = cert.public_bytes(
-        encoding=hp.serialization.Encoding.PEM,
+        encoding=serialization.Encoding.PEM,
     )
     key_pem = key.private_bytes(
-        encoding=hp.serialization.Encoding.PEM,
-        format=hp.serialization.PrivateFormat.TraditionalOpenSSL,
-        encryption_algorithm=hp.serialization.NoEncryption(),
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm=serialization.NoEncryption(),
     )
 
     return key_pem, cert_pem
 
 
 def generate_priv_pub_key_pair(keylength : int = 2048) -> tuple[bytes]:
-    import cryptography.hazmat.primitives as hp
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
 
-    key = hp.asymmetric.rsa.generate_private_key(
+    key = rsa.generate_private_key(
         public_exponent=65537,
         key_size=keylength,
     )
     priv_key_pem = key.private_bytes(
-        encoding=hp.serialization.Encoding.PEM,
-        format=hp.serialization.PrivateFormat.TraditionalOpenSSL,
-        encryption_algorithm=hp.serialization.NoEncryption(),
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm=serialization.NoEncryption(),
     )
     pub_key_pem = key.public_key().public_bytes(
-        encoding=hp.serialization.Encoding.PEM,
-        format=hp.serialization.PublicFormat.SubjectPublicKeyInfo,
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
     )
 
     return priv_key_pem, pub_key_pem
@@ -1037,6 +1046,19 @@ class ConfigItem:
             setattr(namespace, dest, value)
 
     @staticmethod
+    def config_set(
+            namespace: argparse.Namespace,
+            group: Optional[str],
+            dest: str,
+            value: Any,
+    ) -> None:
+        "Set namespace.<dest> to value only if it was None"
+
+        assert not group
+
+        setattr(namespace, dest, value)
+
+    @staticmethod
     def config_set_group(
             namespace: argparse.Namespace,
             group: Optional[str],
@@ -1146,7 +1168,7 @@ CONFIG_ITEMS = [
         'positional',
         metavar = 'VERB',
         nargs = '*',
-        help = f"operation to perform ({','.join(VERBS)})",
+        help = argparse.SUPPRESS,
     ),
 
     ConfigItem(
@@ -1277,8 +1299,9 @@ CONFIG_ITEMS = [
         '--signtool',
         choices = ('sbsign', 'pesign'),
         dest = 'signtool',
-        default = 'sbsign',
-        help = 'whether to use sbsign or pesign. Default is sbsign.',
+        help = 'whether to use sbsign or pesign. It will also be inferred by the other \
+        parameters given: when using --secureboot-{private-key/certificate}, sbsign \
+        will be used, otherwise pesign will be used',
         config_key = 'UKI/SecureBootSigningTool',
     ),
     ConfigItem(
@@ -1299,6 +1322,7 @@ CONFIG_ITEMS = [
         default = '/etc/pki/pesign',
         help = 'required by --signtool=pesign. Path to nss certificate database directory for PE signing. Default is /etc/pki/pesign',
         config_key = 'UKI/SecureBootCertificateDir',
+        config_push = ConfigItem.config_set
     ),
     ConfigItem(
         '--secureboot-certificate-name',
@@ -1309,10 +1333,12 @@ CONFIG_ITEMS = [
     ConfigItem(
         '--secureboot-certificate-validity',
         metavar = 'DAYS',
+        type = int,
         dest = 'sb_cert_validity',
         default = 365 * 10,
         help = "period of validity (in days) for a certificate created by 'genkey'",
         config_key = 'UKI/SecureBootCertificateValidity',
+        config_push = ConfigItem.config_set
     ),
 
     ConfigItem(
@@ -1481,11 +1507,13 @@ class PagerHelpAction(argparse._HelpAction):  # pylint: disable=protected-access
 def create_parser():
     p = argparse.ArgumentParser(
         description='Build and sign Unified Kernel Images',
+        usage='\n  ' + textwrap.dedent('''\
+          ukify {b}build{e} [--linux=LINUX] [--initrd=INITRD] [options…]
+            ukify {b}genkey{e} [options…]
+            ukify {b}inspect{e} FILE… [options…]
+        ''').format(b=Style.bold, e=Style.reset),
         allow_abbrev=False,
         add_help=False,
-        usage='''\
-ukify [options…] VERB
-''',
         epilog='\n  '.join(('config file:', *config_example())),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -1523,7 +1551,7 @@ def finalize_options(opts):
     elif opts.linux or opts.initrd:
         raise ValueError('--linux/--initrd options cannot be used with positional arguments')
     else:
-        print("Assuming obsolete commandline syntax with no verb. Please use 'build'.")
+        print("Assuming obsolete command line syntax with no verb. Please use 'build'.")
         if opts.positional:
             opts.linux = pathlib.Path(opts.positional[0])
         # If we have initrds from parsing config files, append our positional args at the end
@@ -1543,8 +1571,8 @@ def finalize_options(opts):
     if opts.cmdline and opts.cmdline.startswith('@'):
         opts.cmdline = pathlib.Path(opts.cmdline[1:])
     elif opts.cmdline:
-        # Drop whitespace from the commandline. If we're reading from a file,
-        # we copy the contents verbatim. But configuration specified on the commandline
+        # Drop whitespace from the command line. If we're reading from a file,
+        # we copy the contents verbatim. But configuration specified on the command line
         # or in the config file may contain additional whitespace that has no meaning.
         opts.cmdline = ' '.join(opts.cmdline.split())
 
@@ -1571,12 +1599,19 @@ def finalize_options(opts):
         if opts.sb_cert:
             opts.sb_cert = pathlib.Path(opts.sb_cert)
 
-    if opts.signtool == 'sbsign':
-        if bool(opts.sb_key) ^ bool(opts.sb_cert):
-            raise ValueError('--secureboot-private-key= and --secureboot-certificate= must be specified together when using --signtool=sbsign')
-    else:
-        if not bool(opts.sb_cert_name):
-            raise ValueError('--secureboot-certificate-name must be specified when using --signtool=pesign')
+    if bool(opts.sb_key) ^ bool(opts.sb_cert):
+        # one param only given, sbsign needs both
+        raise ValueError('--secureboot-private-key= and --secureboot-certificate= must be specified together')
+    elif bool(opts.sb_key) and bool(opts.sb_cert):
+        # both param given, infer sbsign and in case it was given, ensure signtool=sbsign
+        if opts.signtool and opts.signtool != 'sbsign':
+            raise ValueError(f'Cannot provide --signtool={opts.signtool} with --secureboot-private-key= and --secureboot-certificate=')
+        opts.signtool = 'sbsign'
+    elif bool(opts.sb_cert_name):
+        # sb_cert_name given, infer pesign and in case it was given, ensure signtool=pesign
+        if opts.signtool and opts.signtool != 'pesign':
+            raise ValueError(f'Cannot provide --signtool={opts.signtool} with --secureboot-certificate-name=')
+        opts.signtool = 'pesign'
 
     if opts.sign_kernel and not opts.sb_key and not opts.sb_cert_name:
         raise ValueError('--sign-kernel requires either --secureboot-private-key= and --secureboot-certificate= (for sbsign) or --secureboot-certificate-name= (for pesign) to be specified')

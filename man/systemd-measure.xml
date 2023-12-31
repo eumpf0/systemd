@@ -75,9 +75,10 @@
         <listitem><para>Pre-calculate the expected values seen in PCR register 11 after boot-up of a unified
         kernel image consisting of the components specified with <option>--linux=</option>,
         <option>--osrel=</option>, <option>--cmdline=</option>, <option>--initrd=</option>,
-        <option>--splash=</option>, <option>--dtb=</option>, <option>--sbat=</option>,
-        <option>--pcrpkey=</option> see below. Only <option>--linux=</option> is mandatory. (Alternatively,
-        specify <option>--current</option> to use the current values of PCR register 11 instead.)</para>
+        <option>--splash=</option>, <option>--dtb=</option>, <option>--uname=</option>,
+        <option>--sbat=</option>, <option>--pcrpkey=</option> see below. Only <option>--linux=</option> is
+        mandatory. (Alternatively, specify <option>--current</option> to use the current values of PCR
+        register 11 instead.)</para>
 
         <xi:include href="version-info.xml" xpointer="v252"/>
         </listitem>
@@ -119,6 +120,7 @@
         <term><option>--initrd=<replaceable>PATH</replaceable></option></term>
         <term><option>--splash=<replaceable>PATH</replaceable></option></term>
         <term><option>--dtb=<replaceable>PATH</replaceable></option></term>
+        <term><option>--uname=<replaceable>PATH</replaceable></option></term>
         <term><option>--sbat=<replaceable>PATH</replaceable></option></term>
         <term><option>--pcrpkey=<replaceable>PATH</replaceable></option></term>
 
@@ -126,7 +128,9 @@
         configures the files to read the unified kernel image components from. Each option corresponds with
         the equally named section in the unified kernel PE file. The <option>--linux=</option> switch expects
         the path to the ELF kernel file that the unified PE kernel will wrap. All switches except
-        <option>--linux=</option> are optional. Each option may be used at most once.</para></listitem>
+        <option>--linux=</option> are optional. Each option may be used at most once.</para>
+
+        <xi:include href="version-info.xml" xpointer="v252"/></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -189,7 +193,8 @@
         <listitem><para>Controls which boot phases to calculate expected PCR 11 values for. This takes a
         series of colon-separated strings that encode boot "paths" for entering a specific phase of the boot
         process. Each of the specified strings is measured by the
-        <filename>systemd-pcrphase-initrd.service</filename> and
+        <filename>systemd-pcrphase-initrd.service</filename>,
+        <filename>systemd-pcrphase-sysinit.service</filename>, and
         <citerefentry><refentrytitle>systemd-pcrphase.service</refentrytitle><manvolnum>8</manvolnum></citerefentry>
         into PCR 11 during different milestones of the boot process. This switch may be specified multiple
         times to calculate PCR values for multiple boot phases at once. If not used defaults to
@@ -292,7 +297,7 @@ $ openssl rsa -pubout -in tpm2-pcr-private.pem -out tpm2-pcr-public.pem
 
      <para>And then unlock the device with the signature:</para>
 
-     <programlisting># /usr/lib/systemd/systemd-cryptsetup attach \
+     <programlisting># systemd-cryptsetup attach \
      volume5 /dev/sda5 - \
      tpm2-device=auto,tpm2-signature=/path/to/tpm2-pcr-signature.json</programlisting>
 

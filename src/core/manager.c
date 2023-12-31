@@ -70,6 +70,8 @@
 #include "parse-util.h"
 #include "path-lookup.h"
 #include "path-util.h"
+#include "plymouth-util.h"
+#include "pretty-print.h"
 #include "process-util.h"
 #include "psi-util.h"
 #include "ratelimit.h"
@@ -112,6 +114,8 @@
 /* How many units and jobs to process of the bus queue before returning to the event loop. */
 #define MANAGER_BUS_MESSAGE_BUDGET 100U
 
+#define DEFAULT_TASKS_MAX ((CGroupTasksMax) { 15U, 100U }) /* 15% */
+
 static int manager_dispatch_notify_fd(sd_event_source *source, int fd, uint32_t revents, void *userdata);
 static int manager_dispatch_cgroups_agent_fd(sd_event_source *source, int fd, uint32_t revents, void *userdata);
 static int manager_dispatch_signal_fd(sd_event_source *source, int fd, uint32_t revents, void *userdata);
@@ -142,6 +146,15 @@ static usec_t manager_watch_jobs_next_time(Manager *m) {
         return usec_add(now(CLOCK_MONOTONIC), timeout);
 }
 
+static bool manager_is_confirm_spawn_disabled(Manager *m) {
+        assert(m);
+
+        if (!m->confirm_spawn)
+                return true;
+
+        return access("/run/systemd/confirm_spawn_disabled", F_OK) >= 0;
+}
+
 static void manager_watch_jobs_in_progress(Manager *m) {
         usec_t next;
         int r;
@@ -168,42 +181,6 @@ static void manager_watch_jobs_in_progress(Manager *m) {
                 return;
 
         (void) sd_event_source_set_description(m->jobs_in_progress_event_source, "manager-jobs-in-progress");
-}
-
-#define CYLON_BUFFER_EXTRA (2*STRLEN(ANSI_RED) + STRLEN(ANSI_HIGHLIGHT_RED) + 2*STRLEN(ANSI_NORMAL))
-
-static void draw_cylon(char buffer[], size_t buflen, unsigned width, unsigned pos) {
-        char *p = buffer;
-
-        assert(buflen >= CYLON_BUFFER_EXTRA + width + 1);
-        assert(pos <= width+1); /* 0 or width+1 mean that the center light is behind the corner */
-
-        if (pos > 1) {
-                if (pos > 2)
-                        p = mempset(p, ' ', pos-2);
-                if (log_get_show_color())
-                        p = stpcpy(p, ANSI_RED);
-                *p++ = '*';
-        }
-
-        if (pos > 0 && pos <= width) {
-                if (log_get_show_color())
-                        p = stpcpy(p, ANSI_HIGHLIGHT_RED);
-                *p++ = '*';
-        }
-
-        if (log_get_show_color())
-                p = stpcpy(p, ANSI_NORMAL);
-
-        if (pos < width) {
-                if (log_get_show_color())
-                        p = stpcpy(p, ANSI_RED);
-                *p++ = '*';
-                if (pos < width-1)
-                        p = mempset(p, ' ', width-1-pos);
-                if (log_get_show_color())
-                        strcpy(p, ANSI_NORMAL);
-        }
 }
 
 static void manager_flip_auto_status(Manager *m, bool enable, const char *reason) {
@@ -806,12 +783,12 @@ int manager_setup_memory_pressure_event_source(Manager *m) {
         if (r < 0)
                 log_full_errno(ERRNO_IS_NOT_SUPPORTED(r) || ERRNO_IS_PRIVILEGE(r) || (r == -EHOSTDOWN) ? LOG_DEBUG : LOG_NOTICE, r,
                                "Failed to establish memory pressure event source, ignoring: %m");
-        else if (m->default_memory_pressure_threshold_usec != USEC_INFINITY) {
+        else if (m->defaults.memory_pressure_threshold_usec != USEC_INFINITY) {
 
                 /* If there's a default memory pressure threshold set, also apply it to the service manager itself */
                 r = sd_event_source_set_memory_pressure_period(
                                 m->memory_pressure_event_source,
-                                m->default_memory_pressure_threshold_usec,
+                                m->defaults.memory_pressure_threshold_usec,
                                 MEMORY_PRESSURE_DEFAULT_WINDOW_USEC);
                 if (r < 0)
                         log_warning_errno(r, "Failed to adjust memory pressure threshold, ignoring: %m");
@@ -855,12 +832,27 @@ void manager_set_switching_root(Manager *m, bool switching_root) {
         m->switching_root = MANAGER_IS_SYSTEM(m) && switching_root;
 }
 
-int manager_new(RuntimeScope runtime_scope, ManagerTestRunFlags test_run_flags, Manager **_m) {
+double manager_get_progress(Manager *m) {
+        assert(m);
+
+        if (MANAGER_IS_FINISHED(m) || m->n_installed_jobs == 0)
+                return 1.0;
+
+        return 1.0 - ((double) hashmap_size(m->jobs) / (double) m->n_installed_jobs);
+}
+
+static int compare_job_priority(const void *a, const void *b) {
+        const Job *x = a, *y = b;
+
+        return unit_compare_priority(x->unit, y->unit);
+}
+
+int manager_new(RuntimeScope runtime_scope, ManagerTestRunFlags test_run_flags, Manager **ret) {
         _cleanup_(manager_freep) Manager *m = NULL;
         int r;
 
-        assert(_m);
         assert(IN_SET(runtime_scope, RUNTIME_SCOPE_SYSTEM, RUNTIME_SCOPE_USER));
+        assert(ret);
 
         m = new(Manager, 1);
         if (!m)
@@ -871,15 +863,6 @@ int manager_new(RuntimeScope runtime_scope, ManagerTestRunFlags test_run_flags, 
                 .objective = _MANAGER_OBJECTIVE_INVALID,
 
                 .status_unit_format = STATUS_UNIT_FORMAT_DEFAULT,
-
-                .default_timer_accuracy_usec = USEC_PER_MINUTE,
-                .default_memory_accounting = MEMORY_ACCOUNTING_DEFAULT,
-                .default_tasks_accounting = true,
-                .default_tasks_max = TASKS_MAX_UNSET,
-                .default_timeout_start_usec = manager_default_timeout(runtime_scope),
-                .default_timeout_stop_usec = manager_default_timeout(runtime_scope),
-                .default_restart_usec = DEFAULT_RESTART_USEC,
-                .default_device_timeout_usec = manager_default_timeout(runtime_scope),
 
                 .original_log_level = -1,
                 .original_log_target = _LOG_TARGET_INVALID,
@@ -894,7 +877,7 @@ int manager_new(RuntimeScope runtime_scope, ManagerTestRunFlags test_run_flags, 
                 .notify_fd = -EBADF,
                 .cgroups_agent_fd = -EBADF,
                 .signal_fd = -EBADF,
-                .user_lookup_fds = PIPE_EBADF,
+                .user_lookup_fds = EBADF_PAIR,
                 .private_listen_fd = -EBADF,
                 .dev_autofs_fd = -EBADF,
                 .cgroup_inotify_fd = -EBADF,
@@ -909,16 +892,12 @@ int manager_new(RuntimeScope runtime_scope, ManagerTestRunFlags test_run_flags, 
                 .first_boot = -1,
                 .test_run_flags = test_run_flags,
 
-                .default_oom_policy = OOM_STOP,
+                .dump_ratelimit = (const RateLimit) { .interval = 10 * USEC_PER_MINUTE, .burst = 10 },
 
-                .default_memory_pressure_watch = CGROUP_PRESSURE_WATCH_AUTO,
-                .default_memory_pressure_threshold_usec = USEC_INFINITY,
-
-                .dump_ratelimit = {
-                        .interval = 10 * USEC_PER_MINUTE,
-                        .burst = 10,
-                },
+                .executor_fd = -EBADF,
         };
+
+        unit_defaults_init(&m->defaults, runtime_scope);
 
 #if ENABLE_EFI
         if (MANAGER_IS_SYSTEM(m) && detect_container() <= 0)
@@ -1034,12 +1013,48 @@ int manager_new(RuntimeScope runtime_scope, ManagerTestRunFlags test_run_flags, 
 
                 if (r < 0 && r != -EEXIST)
                         return r;
+
+                m->executor_fd = open(SYSTEMD_EXECUTOR_BINARY_PATH, O_CLOEXEC|O_PATH);
+                if (m->executor_fd < 0)
+                        return log_warning_errno(errno,
+                                                 "Failed to open executor binary '%s': %m",
+                                                 SYSTEMD_EXECUTOR_BINARY_PATH);
+        } else if (!FLAGS_SET(test_run_flags, MANAGER_TEST_DONT_OPEN_EXECUTOR)) {
+                _cleanup_free_ char *self_exe = NULL, *executor_path = NULL;
+                _cleanup_close_ int self_dir_fd = -EBADF;
+                int level = LOG_DEBUG;
+
+                /* Prefer sd-executor from the same directory as the test, e.g.: when running unit tests from the
+                * build directory. Fallback to working directory and then the installation path. */
+                r = readlink_and_make_absolute("/proc/self/exe", &self_exe);
+                if (r < 0)
+                        return r;
+
+                self_dir_fd = open_parent(self_exe, O_CLOEXEC|O_PATH|O_DIRECTORY, 0);
+                if (self_dir_fd < 0)
+                        return self_dir_fd;
+
+                m->executor_fd = RET_NERRNO(openat(self_dir_fd, "systemd-executor", O_CLOEXEC|O_PATH));
+                if (m->executor_fd == -ENOENT)
+                        m->executor_fd = RET_NERRNO(openat(AT_FDCWD, "systemd-executor", O_CLOEXEC|O_PATH));
+                if (m->executor_fd == -ENOENT) {
+                        m->executor_fd = RET_NERRNO(open(SYSTEMD_EXECUTOR_BINARY_PATH, O_CLOEXEC|O_PATH));
+                        level = LOG_WARNING; /* Tests should normally use local builds */
+                }
+                if (m->executor_fd < 0)
+                        return m->executor_fd;
+
+                r = fd_get_path(m->executor_fd, &executor_path);
+                if (r < 0)
+                        return r;
+
+                log_full(level, "Using systemd-executor binary from '%s'.", executor_path);
         }
 
         /* Note that we do not set up the notify fd here. We do that after deserialization,
          * since they might have gotten serialized across the reexec. */
 
-        *_m = TAKE_PTR(m);
+        *ret = TAKE_PTR(m);
 
         return 0;
 }
@@ -1632,6 +1647,7 @@ Manager* manager_free(Manager *m) {
         hashmap_free(m->units_by_invocation_id);
         hashmap_free(m->jobs);
         hashmap_free(m->watch_pids);
+        hashmap_free(m->watch_pids_more);
         hashmap_free(m->watch_bus);
 
         prioq_free(m->run_queue);
@@ -1673,9 +1689,7 @@ Manager* manager_free(Manager *m) {
         free(m->switch_root);
         free(m->switch_root_init);
 
-        free(m->default_smack_process_label);
-
-        rlimit_free_all(m->rlimit);
+        unit_defaults_done(&m->defaults);
 
         assert(hashmap_isempty(m->units_requiring_mounts_for));
         hashmap_free(m->units_requiring_mounts_for);
@@ -1691,9 +1705,13 @@ Manager* manager_free(Manager *m) {
         free(m->watchdog_pretimeout_governor);
         free(m->watchdog_pretimeout_governor_overridden);
 
+        m->fw_ctx = fw_ctx_free(m->fw_ctx);
+
 #if BPF_FRAMEWORK
         lsm_bpf_destroy(m->restrict_fs);
 #endif
+
+        safe_close(m->executor_fd);
 
         return mfree(m);
 }
@@ -1859,7 +1877,8 @@ static void manager_preset_all(Manager *m) {
                 return;
 
         /* If this is the first boot, and we are in the host system, then preset everything */
-        UnitFilePresetMode mode = FIRST_BOOT_FULL_PRESET ? UNIT_FILE_PRESET_FULL : UNIT_FILE_PRESET_ENABLE_ONLY;
+        UnitFilePresetMode mode =
+                ENABLE_FIRST_BOOT_FULL_PRESET ? UNIT_FILE_PRESET_FULL : UNIT_FILE_PRESET_ENABLE_ONLY;
 
         r = unit_file_preset_all(RUNTIME_SCOPE_SYSTEM, 0, NULL, mode, NULL, 0);
         if (r < 0)
@@ -1892,7 +1911,7 @@ static void manager_ready(Manager *m) {
 
 Manager* manager_reloading_start(Manager *m) {
         m->n_reloading++;
-        dual_timestamp_get(m->timestamps + MANAGER_TIMESTAMP_UNITS_LOAD);
+        dual_timestamp_now(m->timestamps + MANAGER_TIMESTAMP_UNITS_LOAD);
         return m;
 }
 
@@ -1916,11 +1935,11 @@ int manager_startup(Manager *m, FILE *serialization, FDSet *fds, const char *roo
         if (r < 0)
                 return r;
 
-        dual_timestamp_get(m->timestamps + manager_timestamp_initrd_mangle(MANAGER_TIMESTAMP_GENERATORS_START));
+        dual_timestamp_now(m->timestamps + manager_timestamp_initrd_mangle(MANAGER_TIMESTAMP_GENERATORS_START));
         r = manager_run_environment_generators(m);
         if (r >= 0)
                 r = manager_run_generators(m);
-        dual_timestamp_get(m->timestamps + manager_timestamp_initrd_mangle(MANAGER_TIMESTAMP_GENERATORS_FINISH));
+        dual_timestamp_now(m->timestamps + manager_timestamp_initrd_mangle(MANAGER_TIMESTAMP_GENERATORS_FINISH));
         if (r < 0)
                 return r;
 
@@ -1942,10 +1961,10 @@ int manager_startup(Manager *m, FILE *serialization, FDSet *fds, const char *roo
                         reloading = manager_reloading_start(m);
 
                 /* First, enumerate what we can from all config files */
-                dual_timestamp_get(m->timestamps + manager_timestamp_initrd_mangle(MANAGER_TIMESTAMP_UNITS_LOAD_START));
+                dual_timestamp_now(m->timestamps + manager_timestamp_initrd_mangle(MANAGER_TIMESTAMP_UNITS_LOAD_START));
                 manager_enumerate_perpetual(m);
                 manager_enumerate(m);
-                dual_timestamp_get(m->timestamps + manager_timestamp_initrd_mangle(MANAGER_TIMESTAMP_UNITS_LOAD_FINISH));
+                dual_timestamp_now(m->timestamps + manager_timestamp_initrd_mangle(MANAGER_TIMESTAMP_UNITS_LOAD_FINISH));
 
                 /* Second, deserialize if there is something to deserialize */
                 if (serialization) {
@@ -2384,14 +2403,18 @@ void manager_clear_jobs(Manager *m) {
                 job_finish_and_invalidate(j, JOB_CANCELED, false, false);
 }
 
-void manager_unwatch_pid(Manager *m, pid_t pid) {
+void manager_unwatch_pidref(Manager *m, PidRef *pid) {
         assert(m);
 
-        /* First let's drop the unit keyed as "pid". */
-        (void) hashmap_remove(m->watch_pids, PID_TO_PTR(pid));
+        for (;;) {
+                Unit *u;
 
-        /* Then, let's also drop the array keyed by -pid. */
-        free(hashmap_remove(m->watch_pids, PID_TO_PTR(-pid)));
+                u = manager_get_unit_by_pidref_watching(m, pid);
+                if (!u)
+                        break;
+
+                unit_unwatch_pidref(u, pid);
+        }
 }
 
 static int manager_dispatch_run_queue(sd_event_source *source, void *userdata) {
@@ -2684,10 +2707,13 @@ static int manager_dispatch_notify_fd(sd_event_source *source, int fd, uint32_t 
         /* Increase the generation counter used for filtering out duplicate unit invocations. */
         m->notifygen++;
 
+        /* Generate lookup key from the PID (we have no pidfd here, after all) */
+        PidRef pidref = PIDREF_MAKE_FROM_PID(ucred->pid);
+
         /* Notify every unit that might be interested, which might be multiple. */
-        u1 = manager_get_unit_by_pid_cgroup(m, ucred->pid);
-        u2 = hashmap_get(m->watch_pids, PID_TO_PTR(ucred->pid));
-        array = hashmap_get(m->watch_pids, PID_TO_PTR(-ucred->pid));
+        u1 = manager_get_unit_by_pidref_cgroup(m, &pidref);
+        u2 = hashmap_get(m->watch_pids, &pidref);
+        array = hashmap_get(m->watch_pids_more, &pidref);
         if (array) {
                 size_t k = 0;
 
@@ -2770,7 +2796,7 @@ static int manager_dispatch_sigchld(sd_event_source *source, void *userdata) {
                 _cleanup_free_ char *name = NULL;
                 Unit *u1, *u2, **array;
 
-                (void) get_process_comm(si.si_pid, &name);
+                (void) pid_get_comm(si.si_pid, &name);
 
                 log_debug("Child "PID_FMT" (%s) died (code=%s, status=%i/%s)",
                           si.si_pid, strna(name),
@@ -2783,10 +2809,14 @@ static int manager_dispatch_sigchld(sd_event_source *source, void *userdata) {
                 /* Increase the generation counter used for filtering out duplicate unit invocations */
                 m->sigchldgen++;
 
+                /* We look this up by a PidRef that only consists of the PID. After all we couldn't create a
+                 * pidfd here any more even if we wanted (since the process just exited). */
+                PidRef pidref = PIDREF_MAKE_FROM_PID(si.si_pid);
+
                 /* And now figure out the unit this belongs to, it might be multiple... */
-                u1 = manager_get_unit_by_pid_cgroup(m, si.si_pid);
-                u2 = hashmap_get(m->watch_pids, PID_TO_PTR(si.si_pid));
-                array = hashmap_get(m->watch_pids, PID_TO_PTR(-si.si_pid));
+                u1 = manager_get_unit_by_pidref_cgroup(m, &pidref);
+                u2 = hashmap_get(m->watch_pids, &pidref);
+                array = hashmap_get(m->watch_pids_more, &pidref);
                 if (array) {
                         size_t n = 0;
 
@@ -3041,6 +3071,19 @@ static int manager_dispatch_signal_fd(sd_event_source *source, int fd, uint32_t 
                                 case COMMON_SIGNAL_COMMAND_NULL:
                                         manager_override_log_target(m, LOG_TARGET_NULL);
                                         break;
+
+                                case MANAGER_SIGNAL_COMMAND_DUMP_JOBS: {
+                                        _cleanup_free_ char *dump_jobs = NULL;
+
+                                        r = manager_get_dump_jobs_string(m, /* patterns= */ NULL, "  ", &dump_jobs);
+                                        if (r < 0) {
+                                                log_warning_errno(errno, "Failed to acquire manager jobs dump: %m");
+                                                break;
+                                        }
+
+                                        log_dump(LOG_INFO, dump_jobs);
+                                        break;
+                                }
 
                                 default:
                                         generic = true;
@@ -3360,10 +3403,8 @@ void manager_send_unit_audit(Manager *m, Unit *u, int type, bool success) {
 }
 
 void manager_send_unit_plymouth(Manager *m, Unit *u) {
-        static const union sockaddr_union sa = PLYMOUTH_SOCKET;
         _cleanup_free_ char *message = NULL;
-        _cleanup_close_ int fd = -EBADF;
-        int n = 0;
+        int c, r;
 
         /* Don't generate plymouth events if the service was already
          * started and we're just deserializing */
@@ -3379,27 +3420,15 @@ void manager_send_unit_plymouth(Manager *m, Unit *u) {
         if (!UNIT_VTABLE(u)->notify_plymouth)
                 return;
 
-        /* We set SOCK_NONBLOCK here so that we rather drop the
-         * message then wait for plymouth */
-        fd = socket(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK, 0);
-        if (fd < 0) {
-                log_error_errno(errno, "socket() failed: %m");
-                return;
-        }
-
-        if (connect(fd, &sa.sa, SOCKADDR_UN_LEN(sa.un)) < 0) {
-                if (!IN_SET(errno, EAGAIN, ENOENT) && !ERRNO_IS_DISCONNECT(errno))
-                        log_error_errno(errno, "connect() failed: %m");
-                return;
-        }
-
-        if (asprintf(&message, "U\002%c%s%n", (int) (strlen(u->id) + 1), u->id, &n) < 0)
+        c = asprintf(&message, "U\x02%c%s%c", (int) (strlen(u->id) + 1), u->id, '\x00');
+        if (c < 0)
                 return (void) log_oom();
 
-        errno = 0;
-        if (write(fd, message, n + 1) != n + 1)
-                if (!IN_SET(errno, EAGAIN, ENOENT) && !ERRNO_IS_DISCONNECT(errno))
-                        log_error_errno(errno, "Failed to write Plymouth message: %m");
+        /* We set SOCK_NONBLOCK here so that we rather drop the message then wait for plymouth */
+        r = plymouth_send_raw(message, c, SOCK_NONBLOCK);
+        if (r < 0)
+                log_full_errno(ERRNO_IS_NO_PLYMOUTH(r) ? LOG_DEBUG : LOG_WARNING, r,
+                               "Failed to communicate with plymouth: %m");
 }
 
 usec_t manager_get_watchdog(Manager *m, WatchdogType t) {
@@ -3554,6 +3583,7 @@ int manager_reload(Manager *m) {
 
         /* We flushed out generated files, for which we don't watch mtime, so we should flush the old map. */
         manager_free_unit_name_maps(m);
+        m->unit_file_state_outdated = false;
 
         /* First, enumerate what we can from kernel and suchlike */
         manager_enumerate_perpetual(m);
@@ -3810,7 +3840,7 @@ void manager_check_finished(Manager *m) {
         /* This is no longer the first boot */
         manager_set_first_boot(m, false);
 
-        dual_timestamp_get(m->timestamps + MANAGER_TIMESTAMP_FINISH);
+        dual_timestamp_now(m->timestamps + MANAGER_TIMESTAMP_FINISH);
 
         manager_notify_finished(m);
 
@@ -4119,32 +4149,67 @@ int manager_get_effective_environment(Manager *m, char ***ret) {
         return 0;
 }
 
-int manager_set_default_smack_process_label(Manager *m, const char *label) {
-        assert(m);
+int manager_set_unit_defaults(Manager *m, const UnitDefaults *defaults) {
+        _cleanup_free_ char *label = NULL;
+        struct rlimit *rlimit[_RLIMIT_MAX];
+        int r;
 
+        assert(m);
+        assert(defaults);
+
+        if (streq_ptr(defaults->smack_process_label, "/"))
+                label = NULL;
+        else  {
+                const char *l = defaults->smack_process_label;
 #ifdef SMACK_DEFAULT_PROCESS_LABEL
-        if (!label)
-                return free_and_strdup(&m->default_smack_process_label, SMACK_DEFAULT_PROCESS_LABEL);
+                if (!l)
+                        l = SMACK_DEFAULT_PROCESS_LABEL;
 #endif
-        if (streq_ptr(label, "/"))
-                return free_and_strdup(&m->default_smack_process_label, NULL);
-
-        return free_and_strdup(&m->default_smack_process_label, label);
-}
-
-int manager_set_default_rlimits(Manager *m, struct rlimit **default_rlimit) {
-        assert(m);
-
-        for (unsigned i = 0; i < _RLIMIT_MAX; i++) {
-                m->rlimit[i] = mfree(m->rlimit[i]);
-
-                if (!default_rlimit[i])
-                        continue;
-
-                m->rlimit[i] = newdup(struct rlimit, default_rlimit[i], 1);
-                if (!m->rlimit[i])
-                        return log_oom();
+                if (l) {
+                        label = strdup(l);
+                        if (!label)
+                                return -ENOMEM;
+                } else
+                        label = NULL;
         }
+
+        r = rlimit_copy_all(rlimit, defaults->rlimit);
+        if (r < 0)
+                return r;
+
+        m->defaults.std_output = defaults->std_output;
+        m->defaults.std_error = defaults->std_error;
+
+        m->defaults.restart_usec = defaults->restart_usec;
+        m->defaults.timeout_start_usec = defaults->timeout_start_usec;
+        m->defaults.timeout_stop_usec = defaults->timeout_stop_usec;
+        m->defaults.timeout_abort_usec = defaults->timeout_abort_usec;
+        m->defaults.timeout_abort_set = defaults->timeout_abort_set;
+        m->defaults.device_timeout_usec = defaults->device_timeout_usec;
+
+        m->defaults.start_limit_interval = defaults->start_limit_interval;
+        m->defaults.start_limit_burst = defaults->start_limit_burst;
+
+        m->defaults.cpu_accounting = defaults->cpu_accounting;
+        m->defaults.memory_accounting = defaults->memory_accounting;
+        m->defaults.io_accounting = defaults->io_accounting;
+        m->defaults.blockio_accounting = defaults->blockio_accounting;
+        m->defaults.tasks_accounting = defaults->tasks_accounting;
+        m->defaults.ip_accounting = defaults->ip_accounting;
+
+        m->defaults.tasks_max = defaults->tasks_max;
+        m->defaults.timer_accuracy_usec = defaults->timer_accuracy_usec;
+
+        m->defaults.oom_policy = defaults->oom_policy;
+        m->defaults.oom_score_adjust = defaults->oom_score_adjust;
+        m->defaults.oom_score_adjust_set = defaults->oom_score_adjust_set;
+
+        m->defaults.memory_pressure_watch = defaults->memory_pressure_watch;
+        m->defaults.memory_pressure_threshold_usec = defaults->memory_pressure_threshold_usec;
+
+        free_and_replace(m->defaults.smack_process_label, label);
+        rlimit_free_all(m->defaults.rlimit);
+        memcpy(m->defaults.rlimit, rlimit, sizeof(struct rlimit*) * _RLIMIT_MAX);
 
         return 0;
 }
@@ -4371,13 +4436,6 @@ void manager_set_first_boot(Manager *m, bool b) {
 
 void manager_disable_confirm_spawn(void) {
         (void) touch("/run/systemd/confirm_spawn_disabled");
-}
-
-bool manager_is_confirm_spawn_disabled(Manager *m) {
-        if (!m->confirm_spawn)
-                return true;
-
-        return access("/run/systemd/confirm_spawn_disabled", F_OK) >= 0;
 }
 
 static bool manager_should_show_status(Manager *m, StatusType type) {
@@ -4851,6 +4909,90 @@ ManagerTimestamp manager_timestamp_initrd_mangle(ManagerTimestamp s) {
             s <= MANAGER_TIMESTAMP_UNITS_LOAD_FINISH)
                 return s - MANAGER_TIMESTAMP_SECURITY_START + MANAGER_TIMESTAMP_INITRD_SECURITY_START;
         return s;
+}
+
+int manager_allocate_idle_pipe(Manager *m) {
+        int r;
+
+        assert(m);
+
+        if (m->idle_pipe[0] >= 0) {
+                assert(m->idle_pipe[1] >= 0);
+                assert(m->idle_pipe[2] >= 0);
+                assert(m->idle_pipe[3] >= 0);
+                return 0;
+        }
+
+        assert(m->idle_pipe[1] < 0);
+        assert(m->idle_pipe[2] < 0);
+        assert(m->idle_pipe[3] < 0);
+
+        r = RET_NERRNO(pipe2(m->idle_pipe + 0, O_NONBLOCK|O_CLOEXEC));
+        if (r < 0)
+                return r;
+
+        r = RET_NERRNO(pipe2(m->idle_pipe + 2, O_NONBLOCK|O_CLOEXEC));
+        if (r < 0) {
+                safe_close_pair(m->idle_pipe + 0);
+                return r;
+        }
+
+        return 1;
+}
+
+void unit_defaults_init(UnitDefaults *defaults, RuntimeScope scope) {
+        assert(defaults);
+        assert(scope >= 0);
+        assert(scope < _RUNTIME_SCOPE_MAX);
+
+        *defaults = (UnitDefaults) {
+                .std_output = EXEC_OUTPUT_JOURNAL,
+                .std_error = EXEC_OUTPUT_INHERIT,
+                .restart_usec = DEFAULT_RESTART_USEC,
+                .timeout_start_usec = manager_default_timeout(scope),
+                .timeout_stop_usec = manager_default_timeout(scope),
+                .timeout_abort_usec = manager_default_timeout(scope),
+                .timeout_abort_set = false,
+                .device_timeout_usec = manager_default_timeout(scope),
+                .start_limit_interval = DEFAULT_START_LIMIT_INTERVAL,
+                .start_limit_burst = DEFAULT_START_LIMIT_BURST,
+
+                /* On 4.15+ with unified hierarchy, CPU accounting is essentially free as it doesn't require the CPU
+                 * controller to be enabled, so the default is to enable it unless we got told otherwise. */
+                .cpu_accounting = cpu_accounting_is_cheap(),
+                .memory_accounting = MEMORY_ACCOUNTING_DEFAULT,
+                .io_accounting = false,
+                .blockio_accounting = false,
+                .tasks_accounting = true,
+                .ip_accounting = false,
+
+                .tasks_max = DEFAULT_TASKS_MAX,
+                .timer_accuracy_usec = 1 * USEC_PER_MINUTE,
+
+                .memory_pressure_watch = CGROUP_PRESSURE_WATCH_AUTO,
+                .memory_pressure_threshold_usec = MEMORY_PRESSURE_DEFAULT_THRESHOLD_USEC,
+
+                .oom_policy = OOM_STOP,
+                .oom_score_adjust_set = false,
+        };
+}
+
+void unit_defaults_done(UnitDefaults *defaults) {
+        assert(defaults);
+
+        defaults->smack_process_label = mfree(defaults->smack_process_label);
+        rlimit_free_all(defaults->rlimit);
+}
+
+LogTarget manager_get_executor_log_target(Manager *m) {
+        assert(m);
+
+        /* If journald is not available tell sd-executor to go to kmsg, as it might be starting journald */
+
+        if (manager_journal_is_running(m))
+                return log_get_target();
+
+        return LOG_TARGET_KMSG;
 }
 
 static const char *const manager_state_table[_MANAGER_STATE_MAX] = {

@@ -1,8 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <errno.h>
-#include <fcntl.h>
-#include <poll.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,14 +11,11 @@
 
 #include "alloc-util.h"
 #include "errno-util.h"
-#include "fd-util.h"
 #include "hostname-util.h"
-#include "io-util.h"
 #include "macro.h"
 #include "memory-util.h"
 #include "path-util.h"
 #include "string-util.h"
-#include "terminal-util.h"
 #include "time-util.h"
 #include "user-util.h"
 #include "utmp-wtmp.h"
@@ -226,7 +221,7 @@ int utmp_put_dead_process(const char *id, pid_t pid, int code, int status) {
         utmpx = utxent_start();
 
         /* Copy the whole string if it fits, or just the suffix without the terminating NUL. */
-        copy_suffix(store.ut_id, sizeof(store.ut_id), id);
+        copy_suffix(lookup.ut_id, sizeof(lookup.ut_id), id);
 
         found = getutxid(&lookup);
         if (!found)

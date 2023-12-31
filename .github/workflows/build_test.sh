@@ -8,8 +8,8 @@ fatal() { echo >&2 -e "\033[31;1m$1\033[0m"; exit 1; }
 success() { echo >&2 -e "\033[32;1m$1\033[0m"; }
 
 ARGS=(
-    "--optimization=0"
-    "--optimization=s"
+    "--optimization=0 -Dopenssl=disabled -Dcryptolib=gcrypt -Ddns-over-tls=gnutls -Dtpm=true -Dtpm2=enabled"
+    "--optimization=s -Dutmp=false"
     "--optimization=3 -Db_lto=true -Ddns-over-tls=false"
     "--optimization=3 -Db_lto=false -Dtpm2=disabled -Dlibfido2=disabled -Dp11kit=disabled"
     "--optimization=3 -Ddns-over-tls=openssl"
@@ -45,7 +45,7 @@ PACKAGES=(
     libxkbcommon-dev
     libxtables-dev
     libzstd-dev
-    mold
+    # mold
     mount
     net-tools
     python3-evdev
@@ -67,6 +67,14 @@ COMPILER_VERSION="${COMPILER_VERSION:?}"
 LINKER="${LINKER:?}"
 CRYPTOLIB="${CRYPTOLIB:?}"
 RELEASE="$(lsb_release -cs)"
+
+# mold-2.2.0+ fixes some bugs breaking bootloader builds.
+# TODO: Switch to distro mold with ubuntu-24.04
+if [[ "$LINKER" == mold ]]; then
+    wget https://github.com/rui314/mold/releases/download/v2.2.0/mold-2.2.0-x86_64-linux.tar.gz
+    echo "d66e0230c562c2ba0e0b789cc5034e0fa2369cc843d0154920de4269cd94afeb  mold-2.2.0-x86_64-linux.tar.gz" | sha256sum -c
+    sudo tar -xz -C /usr --strip-components=1 -f mold-2.2.0-x86_64-linux.tar.gz
+fi
 
 # Note: As we use postfixed clang/gcc binaries, we need to override $AR
 #       as well, otherwise meson falls back to ar from binutils which
@@ -123,20 +131,11 @@ ninja --version
 for args in "${ARGS[@]}"; do
     SECONDS=0
 
-    # mold < 1.1 does not support LTO.
-    if dpkg --compare-versions "$(dpkg-query --showformat='${Version}' --show mold)" ge 1.1; then
-        fatal "Newer mold version detected, please remove this workaround."
-    elif [[ "$args" == *"-Db_lto=true"* ]]; then
-        LD="gold"
-    else
-        LD="$LINKER"
-    fi
-
     info "Checking build with $args"
     # shellcheck disable=SC2086
     if ! AR="$AR" \
-         CC="$CC" CC_LD="$LD" CFLAGS="-Werror" \
-         CXX="$CXX" CXX_LD="$LD" CXXFLAGS="-Werror" \
+         CC="$CC" CC_LD="$LINKER" CFLAGS="-Werror" \
+         CXX="$CXX" CXX_LD="$LINKER" CXXFLAGS="-Werror" \
          meson setup \
                -Dtests=unsafe -Dslow-tests=true -Dfuzz-tests=true --werror \
                -Dnobody-group=nogroup -Dcryptolib="${CRYPTOLIB:?}" -Ddebug=false \

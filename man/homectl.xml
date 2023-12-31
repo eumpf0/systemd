@@ -139,7 +139,9 @@
         <literal>short</literal> all superfluous whitespace is suppressed. If <literal>off</literal> (the
         default) the user information is not shown in JSON format but in a friendly human readable formatting
         instead. The <option>-j</option> option picks <literal>pretty</literal> when run interactively and
-        <literal>short</literal> otherwise.</para></listitem>
+        <literal>short</literal> otherwise.</para>
+
+        <xi:include href="version-info.xml" xpointer="v245"/></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -267,6 +269,11 @@
         owned by a different UID when logging in, the home directory and everything underneath it will have
         its ownership changed automatically before login completes.</para>
 
+        <para>Note that changing this option for existing home directories generally has no effect on home
+        directories that already have been registered locally (have a local <emphasis>binding</emphasis>), as
+        the UID used for an account on the local system is determined when the home directory is first
+        activated on it, and then remains in effect until the home directory is removed.</para>
+
         <para>Note that users managed by <command>systemd-homed</command> always have a matching group
         associated with the same name as well as a GID matching the UID of the user. Thus, configuring the
         GID separately is not permitted.</para>
@@ -338,7 +345,7 @@
         user, including <option>--email=</option>, <option>--timezone=</option> and
         <option>--language=</option>.</para>
 
-        <xi:include href="version-info.xml" xpointer="v250"/></listitem>
+        <xi:include href="version-info.xml" xpointer="v245"/></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -808,7 +815,9 @@
         <para>Note that <command>homectl</command> uses bytes for key size, like
         <filename>/proc/crypto</filename>, but <citerefentry
         project='man-pages'><refentrytitle>cryptsetup</refentrytitle><manvolnum>8</manvolnum></citerefentry>
-        uses bits.</para></listitem>
+        uses bits.</para>
+
+        <xi:include href="version-info.xml" xpointer="v245"/></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -881,7 +890,9 @@
         directory of the share. The <option>--cifs-extra-mount-options=</option> setting allows specifying
         additional mount options when mounting the share, see <citerefentry
         project='man-pages'><refentrytitle>mount.cifs</refentrytitle><manvolnum>8</manvolnum></citerefentry>
-        for details.</para></listitem>
+        for details.</para>
+
+        <xi:include href="version-info.xml" xpointer="v245"/></listitem>
       </varlistentry>
 
       <varlistentry>

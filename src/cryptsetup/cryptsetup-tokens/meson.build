@@ -29,7 +29,7 @@ template = {
                 lib_cryptsetup_token_common,
                 libshared,
         ],
-        'link_depends' : files('cryptsetup-token.sym'),
+        'version-script' : meson.current_source_dir() / 'cryptsetup-token.sym',
         'install_rpath' : pkglibdir,
         'install' : true,
         'install_dir' : libcryptsetup_plugins_dir,
@@ -69,7 +69,7 @@ modules += [
                 'sources' : cryptsetup_token_systemd_pkcs11_sources,
                 'dependencies' : [
                         libcryptsetup,
-                        libp11kit,
+                        libp11kit_cflags,
                 ],
         },
 ]
