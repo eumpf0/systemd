@@ -26,8 +26,7 @@ validpgpkeys=('63CDA1E5D3FC22B998D20DD6327F26951A015CC4'  # Lennart Poettering <
               'A9EA9081724FFAE0484C35A1A81CEA22BC8C7E2E'  # Luca Boccassi <luca.boccassi@gmail.com>
               '9A774DB5DB996C154EBBFBFDA0099A18E29326E1'  # Yu Watanabe <watanabe.yu+github@gmail.com>
               '5C251B5FC54EB2F80F407AAAC54CA336CFEB557E') # Zbigniew Jędrzejewski-Szmek <zbyszek@in.waw.pl>
-source=("git+https://github.com/systemd/systemd-stable#tag=${_tag}?signed"
-        "git+https://github.com/systemd/systemd#tag=v${_tag_name%.*}?signed"
+source=("git+https://github.com/eumpf0/systemd#branch=homed-existing-partition"
         '0001-Use-Arch-Linux-device-access-groups.patch'
         # mkinitcpio files
         'initcpio-hook-udev'
@@ -52,7 +51,6 @@ source=("git+https://github.com/systemd/systemd-stable#tag=${_tag}?signed"
         '30-systemd-udev-reload.hook'
         '30-systemd-update.hook')
 sha512sums=('SKIP'
-            'SKIP'
             '3ccf783c28f7a1c857120abac4002ca91ae1f92205dcd5a84aff515d57e706a3f9240d75a0a67cff5085716885e06e62597baa86897f298662ec36a940cf410e'
             '4a6cd0cf6764863985dc5ad774d7c93b574645a05b3295f989342951d43c71696d069641592e37eeadb6d6f0531576de96b6392224452f15cd9f056fae038f8e'
             'ada692514d758fa11e2be6b4c5e1dc2d9d47548f24ada35afdce1dcac918e72ae2251c892773e6cf41fa431c3613a1608668e999eb86a565870fecb55c47b4ba'
@@ -73,30 +71,8 @@ sha512sums=('SKIP'
             'a50d202a9c2e91a4450b45c227b295e1840cc99a5e545715d69c8af789ea3dd95a03a30f050d52855cabdc9183d4688c1b534eaa755ebe93616f9d192a855ee3'
             '825b9dd0167c072ba62cabe0677e7cd20f2b4b850328022540f122689d8b25315005fa98ce867cf6e7460b2b26df16b88bb3b5c9ebf721746dce4e2271af7b97')
 
-_backports=(
-)
-
-_reverts=(
-)
-
 prepare() {
-  cd "$pkgbase-stable"
-
-  # add upstream repository for cherry-picking
-  git remote add -f upstream ../systemd
-
-  local _c _l
-  for _c in "${_backports[@]}"; do
-    if [[ "${_c}" == *..* ]]; then _l='--reverse'; else _l='--max-count=1'; fi
-    git log --oneline "${_l}" "${_c}"
-    git cherry-pick --mainline 1 --no-commit "${_c}"
-  done
-  for _c in "${_reverts[@]}"; do
-    if [[ "${_c}" == *..* ]]; then _l='--reverse'; else _l='--max-count=1'; fi
-    git log --oneline "${_l}" "${_c}"
-    git revert --mainline 1 --no-commit "${_c}"
-  done
-
+  cd "$pkgbase"
   # Replace cdrom/dialout/tape groups with optical/uucp/storage
   patch -Np1 -i ../0001-Use-Arch-Linux-device-access-groups.patch
 }
@@ -163,7 +139,7 @@ build() {
   export CFLAGS="${CFLAGS/_FORTIFY_SOURCE=3/_FORTIFY_SOURCE=2}"
   export CXXFLAGS="${CXXFLAGS/_FORTIFY_SOURCE=3/_FORTIFY_SOURCE=2}"
 
-  arch-meson "$pkgbase-stable" build "${_meson_options[@]}"
+  arch-meson "$pkgbase" build "${_meson_options[@]}"
 
   meson compile -C build
 }
